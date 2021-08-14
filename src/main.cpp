@@ -30,53 +30,96 @@
  The HX711 board can be powered from 2.7V to 5V so the Arduino 5V power should be fine.
 
 */
+#include "RpiFunctions.hpp"
 #include <Arduino.h>
+#include <Wire.h>
+#include <WireSlave.h>
 #include "HX711.h"
 
-#define DOUT  D5
-#define CLK  D6
+#define DOUT  19
+#define CLK  18
+
+// #define SDA 19
+// #define SCL 18
+#define SDA 21
+#define SCL 22
+
+const int16_t i2c_esp8266=0x06;
+
+// #define HTX_TEST
 
 HX711 scale;
 
-float calibration_factor = 1000; //-7050 worked for my 440lb max scale setup
+float calibration_factor = 20; //-7050 worked for my 440lb max scale setup
+float weightReading;
+uint8_t weightBuffer[sizeof(float)];
+uint8_t flipBuffer[sizeof(float)];
+
+const uint8_t WEIGHT_REGISTER = 0x01;
+
+void getReading(void* param);
+int publishReading(uint8_t registerCode, uint8_t* &data);
+
+void testSetup();
+void testLoop();
 
 void setup() {
+#ifdef HTX_TEST
+  testSetup();
+  return;
+#endif
   Serial.begin(9600);
-  Serial.print("DOUT");
-  Serial.println("HX711 calibration sketch");
-  Serial.println("Remove all weight from scale");
-  Serial.println("After readings begin, place known weight on scale");
-  Serial.println("Press + or a to increase calibration factor");
-  Serial.println("Press - or z to decrease calibration factor");
-
   scale.begin(DOUT, CLK);
-  Serial.print("DOUT");
   scale.set_scale();
-  Serial.print("Scale? ");
+  Serial.println("init");
   scale.tare(); //Reset the scale to 0
 
   long zero_factor = scale.read_average(); //Get a baseline reading
-  Serial.print("Zero factor: "); //This can be used to remove the need to tare the scale. Useful in permanent scale projects.
-  Serial.println(zero_factor);
+  Serial.printf("Zero factor: %d\n", zero_factor); //This can be used to remove the need to tare the scale. Useful in permanent scale projects.
+  scale.set_scale(calibration_factor); //Adjust to this calibration factor
+
+  Rpi::initWireSlave(SDA, SCL, i2c_esp8266);
+  Rpi::registerReadRequest(publishReading);
+  xTaskCreate(&getReading, "weight reading", 10000, NULL, 0, NULL);
 }
 
 void loop() {
+}
 
-  scale.set_scale(calibration_factor); //Adjust to this calibration factor
-
-  Serial.print("Reading: ");
-  Serial.print(scale.get_units(), 1);
-  Serial.print(" kg"); //Change this to kg and re-adjust the calibration factor if you follow SI units like a sane person
-  Serial.print(" calibration_factor: ");
-  Serial.print(calibration_factor);
-  Serial.println();
-
-  if(Serial.available())
-  {
-    char temp = Serial.read();
-    if(temp == '+' || temp == 'a')
-      calibration_factor += 10;
-    else if(temp == '-' || temp == 'z')
-      calibration_factor -= 10;
+void getReading(void* param) {
+  for (;;) {
+    Rpi::updateWire();
+#ifndef HTX_TEST
+    weightReading = scale.get_units();
+#endif
+    Serial.print("Reading: ");
+    Serial.print(weightReading, 1);
+    if (weightReading <= 0) {
+      
+    }
+    Serial.println(" kg"); // Change this to kg and re-adjust the calibration factor if you follow SI units like a sane person
+    memcpy(weightBuffer, &weightReading, sizeof(float));
+    for (int i = 0 ; i < sizeof(float); ++i) {
+      flipBuffer[i] = weightBuffer[sizeof(float) - 1 - i];
+    }
+    vTaskDelay(5);
   }
+
+}
+
+int publishReading(uint8_t registerCode, uint8_t* &data) {
+  switch(registerCode) {
+    case WEIGHT_REGISTER:
+      data = flipBuffer;
+    return sizeof(float);
+  }
+  return 0;
+}
+
+void testSetup() {
+  Serial.begin(9600);
+  Rpi::initWireSlave(SDA, SCL, i2c_esp8266);
+  Rpi::registerReadRequest(publishReading);
+  weightReading = 59;
+  xTaskCreate(&getReading, "weight reading", 10000, NULL, 0, NULL);
 }
